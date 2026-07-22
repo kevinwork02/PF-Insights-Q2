@@ -1,6 +1,6 @@
 """PF Insights Q2 — Campaign Audience Demographics
 
-Streamlit app: DMA/zip filter → FreeWheel campaign impressions →
+Streamlit app: Select campaigns → FreeWheel impressions →
 identity resolution → Experian demographic profiling (Age, Gender,
 Ethnicity, HHI, Education).
 
@@ -23,13 +23,6 @@ LIGHT_CYAN = "#80DEEA"
 LIME = "#C5E063"
 DARK_BG = "#0d1f3a"
 BORDER = "#2a3d5e"
-
-# ── Campaign IDs (Planet Fitness Q2 2025 from Operative) ──────────────────────
-CAMPAIGN_IDS = [
-    '98126', '98416', '98425', '98118', '98121', '98123', '98124', '98125',
-    '98397', '98415', '98421', '98530', '98127', '98119', '98417', '98423',
-    '98447', '98173', '98422', '98420', '98597', '96690',
-]
 
 
 # ── Configuration (matches Market Demographics pattern) ───────────────────────
@@ -97,54 +90,44 @@ CSS = f"""
 """
 
 
-# ── Cached Loaders (server-side aggregation) ──────────────────────────────────
+# ── Campaign IDs (Planet Fitness Q2 2025 from Operative) ──────────────────────
+CAMPAIGN_IDS = [
+    '98126', '98416', '98425', '98118', '98121', '98123', '98124', '98125',
+    '98397', '98415', '98421', '98530', '98127', '98119', '98417', '98423',
+    '98447', '98173', '98422', '98420', '98597', '96690',
+]
+
+
+# ── Cached Loaders ────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
-def load_dma_list() -> pd.DataFrame:
-    df = _run_query("""
-        SELECT d.dma_code, d.dma_name, COUNT(DISTINCT el.luid) AS hh_count
-        FROM locality_dev.silver.experian_location el
-        JOIN locality_dev.default.dma_codes_v3 d ON el.dma = CAST(d.dma_code AS STRING)
-        WHERE el.dma IS NOT NULL
-        GROUP BY d.dma_code, d.dma_name
-        ORDER BY hh_count DESC
+def load_campaign_list() -> pd.DataFrame:
+    """Load campaign metadata from placement mapping for the known IDs."""
+    id_list = ", ".join(f"\'{c}\'" for c in CAMPAIGN_IDS)
+    df = _run_query(f"""
+        SELECT
+            locality_campaign_id,
+            locality_advertiser,
+            locality_campaign,
+            locality_campaign_start_date,
+            locality_campaign_end_date,
+            COUNT(DISTINCT fw_placement_id) AS placement_count
+        FROM locality_dev.silver.freewheel_placement_mapping
+        WHERE locality_campaign_id IN ({id_list})
+        GROUP BY locality_campaign_id, locality_advertiser, locality_campaign,
+                 locality_campaign_start_date, locality_campaign_end_date
+        ORDER BY locality_campaign_start_date, locality_campaign
     """)
-    df["hh_count"] = df["hh_count"].astype(int)
     return df
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_zip_codes(dma_codes: tuple) -> pd.DataFrame:
-    dma_filter = ", ".join(f"\'{c}\'" for c in dma_codes)
-    return _run_query(f"""
-        SELECT el.zipcode, el.dma AS dma_code, COUNT(DISTINCT el.luid) AS hh_count
-        FROM locality_dev.silver.experian_location el
-        WHERE el.dma IN ({dma_filter})
-          AND el.zipcode IS NOT NULL
-        GROUP BY el.zipcode, el.dma
-        ORDER BY hh_count DESC
-    """)
-
-
-def _campaign_where(dma_codes: tuple, zip_codes: tuple) -> str:
-    """Build WHERE clauses for campaign impression queries."""
-    campaign_list = ", ".join(f"\'{c}\'" for c in CAMPAIGN_IDS)
-    base = f"fw.locality_campaign_id IN ({campaign_list})"
-    if dma_codes:
-        dma_list = ", ".join(f"\'{d}\'" for d in dma_codes)
-        base += f" AND fw.visitor_dma IN ({dma_list})"
-    if zip_codes:
-        zip_list = ", ".join(f"\'{z}\'" for z in zip_codes)
-        base += f" AND fw.visitor_postal_code IN ({zip_list})"
-    return base
-
-
-def _resolve_cte(fw_where: str) -> str:
-    """Shared CTE for campaign_impressions → resolved_luids."""
+def _resolve_cte(campaign_ids: list) -> str:
+    """Shared CTE: campaign IDs → FW logs → identity resolution → LUIDs."""
+    campaign_list = ", ".join(f"\'{c}\'" for c in campaign_ids)
     return f"""
         WITH campaign_impressions AS (
             SELECT DISTINCT fw.ip_address, fw.device_id, fw.device_id_prefix
             FROM locality_dev.gold.freewheel_logs_gold fw
-            WHERE {fw_where}
+            WHERE fw.locality_campaign_id IN ({campaign_list})
         ),
         resolved_luids AS (
             SELECT DISTINCT idm.luid
@@ -158,9 +141,8 @@ def _resolve_cte(fw_where: str) -> str:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_summary(dma_codes: tuple, zip_codes: tuple) -> dict:
-    fw_where = _campaign_where(dma_codes, zip_codes)
-    cte = _resolve_cte(fw_where)
+def load_summary(campaign_ids: tuple) -> dict:
+    cte = _resolve_cte(list(campaign_ids))
     df = _run_query(f"""
         {cte}
         SELECT
@@ -180,9 +162,8 @@ def load_summary(dma_codes: tuple, zip_codes: tuple) -> dict:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_age_dist(dma_codes: tuple, zip_codes: tuple) -> pd.DataFrame:
-    fw_where = _campaign_where(dma_codes, zip_codes)
-    cte = _resolve_cte(fw_where)
+def load_age_dist(campaign_ids: tuple) -> pd.DataFrame:
+    cte = _resolve_cte(list(campaign_ids))
     return _run_query(f"""
         {cte}
         SELECT
@@ -206,9 +187,8 @@ def load_age_dist(dma_codes: tuple, zip_codes: tuple) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_gender_dist(dma_codes: tuple, zip_codes: tuple) -> pd.DataFrame:
-    fw_where = _campaign_where(dma_codes, zip_codes)
-    cte = _resolve_cte(fw_where)
+def load_gender_dist(campaign_ids: tuple) -> pd.DataFrame:
+    cte = _resolve_cte(list(campaign_ids))
     return _run_query(f"""
         {cte}
         SELECT ma.gender, COUNT(*) AS cnt
@@ -222,9 +202,8 @@ def load_gender_dist(dma_codes: tuple, zip_codes: tuple) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_ethnicity_dist(dma_codes: tuple, zip_codes: tuple) -> pd.DataFrame:
-    fw_where = _campaign_where(dma_codes, zip_codes)
-    cte = _resolve_cte(fw_where)
+def load_ethnicity_dist(campaign_ids: tuple) -> pd.DataFrame:
+    cte = _resolve_cte(list(campaign_ids))
     return _run_query(f"""
         {cte}
         SELECT ma.ethnic_group, COUNT(*) AS cnt
@@ -239,9 +218,8 @@ def load_ethnicity_dist(dma_codes: tuple, zip_codes: tuple) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_income_dist(dma_codes: tuple, zip_codes: tuple) -> pd.DataFrame:
-    fw_where = _campaign_where(dma_codes, zip_codes)
-    cte = _resolve_cte(fw_where)
+def load_income_dist(campaign_ids: tuple) -> pd.DataFrame:
+    cte = _resolve_cte(list(campaign_ids))
     return _run_query(f"""
         {cte}
         SELECT
@@ -266,9 +244,8 @@ def load_income_dist(dma_codes: tuple, zip_codes: tuple) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_education_dist(dma_codes: tuple, zip_codes: tuple) -> pd.DataFrame:
-    fw_where = _campaign_where(dma_codes, zip_codes)
-    cte = _resolve_cte(fw_where)
+def load_education_dist(campaign_ids: tuple) -> pd.DataFrame:
+    cte = _resolve_cte(list(campaign_ids))
     return _run_query(f"""
         {cte}
         SELECT ma.education_level, COUNT(*) AS cnt
@@ -389,58 +366,52 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ── Step 1: DMA Selection ──
-    st.markdown('<div class="step-pill">Step 1 · Select Markets</div>', unsafe_allow_html=True)
-    st.markdown("Choose one or more DMAs:")
+    # ── Step 1: Campaign Selection ──
+    st.markdown('<div class="step-pill">Step 1 · Select Campaigns</div>', unsafe_allow_html=True)
+    st.markdown("Choose one or more Planet Fitness campaigns:")
 
-    with st.spinner("Loading DMA list..."):
-        dma_df = load_dma_list()
+    with st.spinner("Loading campaign list..."):
+        campaign_df = load_campaign_list()
 
-    dma_options = {
-        f"{r['dma_name']} ({int(r['hh_count']):,} HHs)": str(r["dma_code"])
-        for _, r in dma_df.iterrows()
-    }
-    selected_labels = st.multiselect(
-        "Search or select markets...",
-        options=list(dma_options.keys()),
-        default=[],
-        label_visibility="collapsed",
-        placeholder="Search or select markets...",
+    # Build display labels: short campaign name + date range
+    campaign_df["label"] = (
+        campaign_df["locality_campaign_id"] + " — "
+        + campaign_df["locality_campaign"].str.extract(r"_(.*?)_O-", expand=False).fillna(campaign_df["locality_campaign"])
+        + " (" + campaign_df["locality_campaign_start_date"].astype(str).str[:10]
+        + " to " + campaign_df["locality_campaign_end_date"].astype(str).str[:10] + ")"
     )
-    selected_dma_codes = tuple(dma_options[lbl] for lbl in selected_labels)
+    campaign_options = dict(zip(campaign_df["label"], campaign_df["locality_campaign_id"]))
 
-    if not selected_dma_codes:
-        st.info("Select at least one DMA to continue.")
+    # Select All checkbox
+    select_all = st.checkbox("Select all campaigns", value=True)
+
+    if select_all:
+        selected_campaign_ids = tuple(campaign_df["locality_campaign_id"].tolist())
+        st.caption(f"✓ All {len(selected_campaign_ids)} campaigns selected")
+    else:
+        selected_labels = st.multiselect(
+            "Search or select campaigns...",
+            options=list(campaign_options.keys()),
+            default=[],
+            label_visibility="collapsed",
+            placeholder="Search or select campaigns...",
+        )
+        selected_campaign_ids = tuple(campaign_options[lbl] for lbl in selected_labels)
+
+    if not selected_campaign_ids:
+        st.info("Select at least one campaign to continue.")
         return
 
-    # ── Step 2: Optional Zip Code Filter ──
-    st.markdown('<div class="step-pill">Step 2 · Filter by Zip (Optional)</div>', unsafe_allow_html=True)
-    with st.expander("📍 Select specific zip codes within the DMA(s)", expanded=False):
-        with st.spinner("Loading zip codes..."):
-            zip_df = load_zip_codes(selected_dma_codes)
-        zip_options = sorted(zip_df["zipcode"].unique().tolist())
-        selected_zips = st.multiselect(
-            "Select zip codes (leave empty for entire DMA)",
-            options=zip_options,
-            default=[],
-            help=f"{len(zip_options)} zip codes available in selected DMA(s)",
-        )
-    selected_zip_tuple = tuple(selected_zips) if selected_zips else ()
-
-    # ── Campaign info (collapsible) ──
-    with st.expander(f"📋 {len(CAMPAIGN_IDS)} Planet Fitness campaigns included", expanded=False):
-        st.code(", ".join(CAMPAIGN_IDS))
-
-    # ── Step 3: Demographic Profile ──
-    st.markdown('<div class="step-pill">Step 3 · Demographic Profile</div>', unsafe_allow_html=True)
+    # ── Step 2: Demographic Profile ──
+    st.markdown('<div class="step-pill">Step 2 · Demographic Profile</div>', unsafe_allow_html=True)
 
     with st.spinner("Querying campaign impressions & resolving identities..."):
-        summary = load_summary(selected_dma_codes, selected_zip_tuple)
-        age_df = load_age_dist(selected_dma_codes, selected_zip_tuple)
-        gender_df = load_gender_dist(selected_dma_codes, selected_zip_tuple)
-        eth_df = load_ethnicity_dist(selected_dma_codes, selected_zip_tuple)
-        inc_df = load_income_dist(selected_dma_codes, selected_zip_tuple)
-        edu_df = load_education_dist(selected_dma_codes, selected_zip_tuple)
+        summary = load_summary(selected_campaign_ids)
+        age_df = load_age_dist(selected_campaign_ids)
+        gender_df = load_gender_dist(selected_campaign_ids)
+        eth_df = load_ethnicity_dist(selected_campaign_ids)
+        inc_df = load_income_dist(selected_campaign_ids)
+        edu_df = load_education_dist(selected_campaign_ids)
 
     if summary["total_persons"] == 0:
         st.warning(
@@ -455,7 +426,7 @@ def main():
     col1.metric("Total Persons", f"{summary['total_persons']:,}")
     col2.metric("Median Age", str(summary["median_age"]) if summary["median_age"] else "N/A")
     col3.metric("Median HHI", f"${summary['median_income']}K" if summary["median_income"] else "N/A")
-    col4.metric("DMAs Selected", str(len(selected_dma_codes)))
+    col4.metric("Campaigns Selected", str(len(selected_campaign_ids)))
 
     # Charts in 2-column layout
     st.markdown("---")
