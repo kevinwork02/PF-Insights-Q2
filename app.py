@@ -90,7 +90,7 @@ CSS = f"""
 """
 
 
-# ── Campaign IDs (Planet Fitness Q2 2025 from Operative) ──────────────────────
+# ── Campaign IDs (Planet Fitness Q2 2026 from Operative) ──────────────────────
 CAMPAIGN_IDS = [
     '103261', '103277', '103278', '103279', '103280', '103281', '103282', '103283',
     '103284', '103289', '103290', '103311', '103330', '103331', '103332', '103389',
@@ -415,9 +415,9 @@ def main():
 
     if summary["total_persons"] == 0:
         st.warning(
-            "⚠️ No audience members matched. "
-            "This may occur if campaign impressions are not yet available "
-            "in the FreeWheel logs (data starts 2025-09-28)."
+            "⚠️ No audience members matched for the selected campaigns. "
+            "This may occur if campaign impressions have not yet been "
+            "ingested into FreeWheel logs or identity resolution yielded no matches."
         )
         return
 
